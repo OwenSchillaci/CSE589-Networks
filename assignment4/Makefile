@@ -39,7 +39,8 @@ export P4_PROGRAM_NAME ?=
 export P4RT_PROGRAM_DIRNAME ?=
 export P4RT_PROGRAM_NAME ?=
 
-export topo ?= linear,2,2
+export topo ?= mytopo
+export topo_file ?= 2spine2leaf_clos.py
 export name ?=
 export grpc_port ?= 50001
 
@@ -57,7 +58,7 @@ help:
 
 # Usage: make mininet topo=linear,2,2
 mininet:
-	$(SCRIPTS)/mn-stratum --topo $(topo)
+	$(SCRIPTS)/mn-stratum $(if $(filter mytopo, $(topo)),--custom $(topo_file),) --topo $(topo)
 	make clean
 
 # Usage: make enable-vlan topo=linear,2,2
