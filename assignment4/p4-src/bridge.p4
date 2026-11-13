@@ -41,18 +41,48 @@ header packet_in_header_t {
     bit<7> _pad;
 }
 
+header project_t {
+    bit<16> step_id;
+    bit<32> seq_no;
+    bit<8>  path_id;
+    bit<8>  flags;
+}
+
+header ipv4_t {
+    bit<4>  version;
+    bit<4>  ihl;
+    bit<8>  diffserv;
+    bit<16> totalLen;
+    bit<16> identification;
+    bit<3>  flags;
+    bit<13> fragOffset;
+    bit<8>  ttl;
+    bit<8>  protocol;
+    bit<16> hdrChecksum;
+    bit<32> srcAddr;
+    bit<32> dstAddr;
+}
+
+header udp_t {
+    bit<16> srcPort;
+    bit<16> dstPort;
+    bit<16> length;
+    bit<16> checksum;
+}
+
+
 header ethernet_t {
     macAddr_t dstAddr;
     macAddr_t srcAddr;
     bit<16> etherType;
 }
 
-struct metadata {
-    /* empty */
-}
 
 struct headers {
     ethernet_t ethernet;
+    ipv4_t ipv4;
+    udp_t udp;
+    project_t project;
     packet_in_header_t packet_in;
 }
 
@@ -65,13 +95,36 @@ parser MyParser(packet_in packet,
                 inout metadata meta,
                 inout standard_metadata_t standard_metadata) {
 
-    state start {
-        transition parse_ethernet;
-    }
-
     state parse_ethernet {
         packet.extract(hdr.ethernet);
+
+        transition select(hdr.ethernet.etherType) {
+            0x0800: parse_ipv4;
+            default: accept
+        }
+    }
+    
+    state parse_ipv4 {
+        packet.extract(hdr.ipv4);
+        transition select(hdr.ipv4.protocol) {
+            17: parse_udp;
+            default: accept
+        }
+
+    }
+
+    state parse_udp {
+        packet.extract(hdr.udp);
+        transition select(hdr.udp.dstPort) {
+            5000: parse_project;
+            default: accept
+        }
+
+    }
+    state parse_project {
+        packet.extract(hdr.project);
         transition accept;
+
     }
 }
 
@@ -160,7 +213,10 @@ control MyDeparser(packet_out packet, in headers hdr) {
     apply {
         packet.emit(hdr.packet_in);
         packet.emit(hdr.ethernet);
-    }
+        packet.emit(hdr.ipv4);
+        packet.emit(hdr.udp);
+        packet.emit(hdr.project); 
+   }
 }
 
 /**************************************************************************/
