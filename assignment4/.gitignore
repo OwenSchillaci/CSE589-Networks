@@ -1,2 +1,4 @@
 cfg/
 logs/
+# Automated workflow state, logs, and CSV captures
+.project-run/

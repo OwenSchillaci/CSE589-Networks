@@ -28,7 +28,85 @@ Switches run Stratum BMv2 inside a Docker-based Mininet environment.
 
 Mininet and the P4 toolchain run inside Docker. A separate local Mininet installation is not required.
 
-## Getting Started
+## Automated development workflow
+
+Run from `assignment4/` (use `sudo make` if Docker requires it):
+
+```bash
+make project-up
+make test-paths
+make test-paced count=100 rate=100 path_id=0
+make test-paced count=1000 rate=1000 path_id=1
+make project-down
+```
+
+- `project-up` generates port mappings from the actual Clos topology, launches
+  Mininet, and builds/installs the bridge pipeline through the existing controller
+  target on all four switches. It waits for the Mininet CLI and completed
+  forwarding-entry installation before reporting PASS. Startup failures clean up
+  the managed containers and return a nonzero exit status. Repeating startup
+  while everything is ready reports “already running”.
+- `test-paths` selects each path automatically and sends three h1 → h3 packets.
+  It verifies exact sequence delivery and path IDs, plus packet captures showing
+  all three packets on the selected spine and none on the other. Capture
+  interfaces come from the generated topology configuration.
+- `test-paced` selects the requested source-leaf path automatically and runs the
+  existing sender/receiver. Options are `count=100`, `rate=100`, `path_id=0`,
+  `payload_size=64`, and `test_timeout=5` (receiver idle seconds). It prints both
+  tools' statistics and returns FAIL on loss, duplicates, reordering, incorrect
+  path IDs, process errors, or readiness timeouts. Both test targets require a
+  successful `project-up` and leave the environment running for debugging.
+- `project-down` interrupts controllers and sends `exit` to the Mininet CLI so
+  hosts, links, and switches are removed normally. It falls back to bounded
+  Docker shutdown if a component is unresponsive. It is safe to repeat. Build
+  artifacts and logs remain available; the existing `make clean` still removes
+  `cfg/` and `logs/` when explicitly requested.
+
+No extra Python packages are needed: orchestration uses Python 3 standard
+libraries, Docker, Make, and the repository's existing images. Physical-route
+checks use `tcpdump` and `timeout` already present in the Mininet image. Host
+commands use Mininet's `mnexec`, without needing interactive terminals.
+
+Logs and test CSVs are kept under `assignment4/.project-run/` (gitignored).
+Each test prints its own result directory with `sender.log`, `receiver.log`,
+`tx.csv`, `rx.csv`, and, for path tests, `spine0.log` / `spine1.log`.
+Mininet/controller logs are saved at the top level there on readiness checks
+and before shutdown. Build logs include the controller gRPC port. Live logs:
+
+```bash
+docker logs -f mn-stratum
+docker logs -f p4runtime-sh-50003
+make host name=h1
+```
+
+The existing manual `make mininet`, `make controller`, and `make host` commands
+remain available. Automation uses the standard container names and gRPC ports
+50001–50004; stop manual components before `project-up`. Ownership labels ensure
+`project-down` never removes containers belonging to manual launches or another
+checkout. A lock rejects concurrent automation commands in the same checkout.
+Tests run one h1/h3 stream at a time; avoid concurrent manual traffic on port
+5000 during route captures. Switching paths automatically restarts only the s3
+controller, so do not send during that transition. This workflow targets the
+existing default Clos topology; linear topologies remain a manual debugging path.
+
+Workflow validation completed on the Docker Stratum target:
+
+| Check | Result |
+|---|---|
+| Startup and repeated startup | PASS; four controllers ready, no duplicate containers |
+| Both physical paths | PASS; 3/3 packets on selected spine, 0 on other, correct IDs |
+| Paced path 0, 100 at 100 packets/sec | PASS; 100 received, sender 99.98 packets/sec |
+| Paced path 1, 1000 at 1000 packets/sec | PASS; 1000 received, sender 999.81 packets/sec |
+| Deliberately disabled spine 1 link | Expected FAIL with missing=3 and nonzero status |
+| Restored link | PASS; 3/3 received |
+| Shutdown | PASS; Mininet log confirms all eight links, four switches, and four hosts stopped |
+
+The paced runs had zero loss, duplicates, or reordering. All nine unit tests and shell
+syntax/whitespace checks also passed. Lifecycle tests cover startup rollback,
+cleanup continuing after an error, and preserving unmanaged containers. See [paced traffic](docs/paced-traffic.md)
+for timestamp and statistics definitions.
+
+## Manual Getting Started
 
 Run the following commands from the `assignment4/` directory.
 
@@ -121,3 +199,8 @@ The custom Clos topology is used for the project's primary experiments. Linear t
 **Note:** Starting a topology does not automatically install the P4 forwarding rules. Controller configuration must match the selected topology.
 
 
+
+## Explicit project paths
+
+See [project setup and validation](docs/project-paths.md) for the normal bridge
+build/controller commands, path selection, UDP tools, and checksum behavior.

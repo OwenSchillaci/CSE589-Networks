@@ -4,7 +4,8 @@ MN_STRATUM_DOCKER_NAME=${MN_STRATUM_DOCKER_NAME:-mn-stratum}
 MN_STRATUM_IMG=${MN_STRATUM_IMG:-opennetworking/mn-stratum:latest}
 MN_STRATUM_MOUNT_DIR=${MN_STRATUM_MOUNT_DIR:-$PWD}
 
-docker run --privileged --rm -it \
+# Override for the automated workflow; interactive behavior remains the default.
+docker run --privileged ${MN_STRATUM_RUN_FLAGS:--it --rm} \
     --name $MN_STRATUM_DOCKER_NAME \
     --network host \
     -v /tmp/mn-stratum:/tmp \
