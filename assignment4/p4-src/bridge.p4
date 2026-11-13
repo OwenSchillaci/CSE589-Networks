@@ -78,6 +78,8 @@ header ethernet_t {
 }
 
 
+struct metadata { bit<1> unused; }
+
 struct headers {
     ethernet_t ethernet;
     ipv4_t ipv4;
@@ -95,20 +97,25 @@ parser MyParser(packet_in packet,
                 inout metadata meta,
                 inout standard_metadata_t standard_metadata) {
 
+    state start { transition parse_ethernet; }
+
     state parse_ethernet {
         packet.extract(hdr.ethernet);
 
         transition select(hdr.ethernet.etherType) {
             0x0800: parse_ipv4;
-            default: accept
+            default: accept;
         }
     }
     
     state parse_ipv4 {
         packet.extract(hdr.ipv4);
-        transition select(hdr.ipv4.protocol) {
-            17: parse_udp;
-            default: accept
+        // Options and fragments stay opaque and retain bridge behavior.
+        transition select(hdr.ipv4.version, hdr.ipv4.ihl,
+                          hdr.ipv4.flags & 1, hdr.ipv4.fragOffset,
+                          hdr.ipv4.protocol) {
+            (4, 5, 0, 0, 17): parse_udp;
+            default: accept;
         }
 
     }
@@ -117,11 +124,14 @@ parser MyParser(packet_in packet,
         packet.extract(hdr.udp);
         transition select(hdr.udp.dstPort) {
             5000: parse_project;
-            default: accept
+            default: accept;
         }
 
     }
     state parse_project {
+        verify(hdr.udp.length >= 16 &&
+               hdr.ipv4.totalLen >= hdr.udp.length + 20,
+               error.PacketTooShort);
         packet.extract(hdr.project);
         transition accept;
 
@@ -152,6 +162,27 @@ control MyIngress(inout headers hdr,
         standard_metadata.mcast_grp = MCAST_ID;
     }
 
+    action forward_to_port(bit<9> port) {
+        standard_metadata.egress_spec = port;
+    }
+
+    action select_path(bit<9> port, bit<8> path_id) {
+        standard_metadata.egress_spec = port;
+        hdr.project.path_id = path_id;
+    }
+
+    // Entries on source leaves select a path; transit/destination entries
+    // preserve the stamped ID. Missing project routes fail closed.
+    table project_forward {
+        key = {
+            hdr.ipv4.dstAddr: exact;
+            standard_metadata.ingress_port: exact;
+        }
+        actions = { select_path; forward_to_port; drop; }
+        size = 128;
+        default_action = drop();
+    }
+
     table bridge_table {
         key = {
             hdr.ethernet.dstAddr: exact;
@@ -166,7 +197,16 @@ control MyIngress(inout headers hdr,
     }
     
     apply {
-        bridge_table.apply();
+        if (standard_metadata.parser_error != error.NoError) {
+            drop();
+        } else if (hdr.project.isValid()) {
+            project_forward.apply();
+            // IPv4 permits checksum zero (UDP checksum disabled). No IP
+            // fields change, so the original IPv4 checksum remains valid.
+            hdr.udp.checksum = 0;
+        } else {
+            bridge_table.apply();
+        }
     }
 }
 

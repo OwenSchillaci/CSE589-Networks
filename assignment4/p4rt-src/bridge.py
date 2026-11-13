@@ -136,6 +136,7 @@ if __name__ == '__main__':
                         type=str, action="store", default='50001')
     parser.add_argument('--topo-config', help='Topology Configuration File', required=True,
                         type=str, action="store")
+    parser.add_argument('--path-id', type=int, choices=(0, 1), default=0)
     args = parser.parse_args()
 
     # Create a bridge name postfixed with the grpc port number
@@ -162,6 +163,21 @@ if __name__ == '__main__':
 
     # Install broadcast rule (with CPU port)
     InstallMcastGrpEntry(mcast_group_id, mcast_group_ports + [BRIDGE_CPU_PORT])
+
+    # Optional project routes; linear assignment configurations are unchanged.
+    with contextlib.redirect_stdout(None):
+        for route in topo_config['switch'][args.grpc_port].get('project', []):
+            selecting = 'paths' in route
+            action = 'select_path' if selecting else 'forward_to_port'
+            entry = p4sh.TableEntry('MyIngress.project_forward')(
+                action='MyIngress.' + action)
+            entry.match['hdr.ipv4.dstAddr'] = route['dst']
+            entry.match['standard_metadata.ingress_port'] = str(route['ingress'])
+            entry.action['port'] = str(route['paths'][args.path_id] if selecting else route['port'])
+            if selecting:
+                entry.action['path_id'] = str(args.path_id)
+            entry.insert()
+    print('Project path: {0}'.format(args.path_id))
 
     # Start the packet-processing loop
     ProcPacketIn(bridge_name, LOGS_DIR, NUM_LOGS_THRESHOLD)

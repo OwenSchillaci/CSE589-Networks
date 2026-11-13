@@ -41,12 +41,15 @@ export P4RT_PROGRAM_NAME ?=
 
 export topo ?= mytopo
 export topo_file ?= 2spine2leaf_clos.py
+export path_id ?= 0
 export name ?=
 export grpc_port ?= 50001
 
 .PHONY: help mininet enable-vlan disable-vlan controller controller-logs bridge switch host clean
 
 help:
+	@echo "Automated Clos: make project-up | test-paths | test-paced | project-down"
+	@echo "  make test-paced count=1000 rate=1000 path_id=1 payload_size=64"
 	@echo "Example usage:"
 	@echo "  sudo make mininet topo=linear,2,2                                      Start Mininet"
 	@echo "  sudo make enable-vlan topo=linear,2,2                                  Enable VLAN"
@@ -54,7 +57,7 @@ help:
 	@echo "  sudo make controller name=bridge grpc_port=50001 topo=linear,2,2       Start Controller"
 	@echo "  sudo make controller-logs name=bridge grpc_port=50001                  Log Controller Stats"
 	@echo "  sudo make host name=h1s1                                               Access Host"
-	@echo "  sudo make clean   
+	@echo "  sudo make clean"
 
 # Usage: make mininet topo=linear,2,2
 mininet:
@@ -129,7 +132,7 @@ clean: .p4rt-clean .p4-clean
 	mkdir -p logs/$(P4_PROGRAM_DIRNAME)
 	P4RUNTIME_SH_DOCKER_NAME=p4runtime-sh-$(grpc_port) \
 	$(SCRIPTS)/p4runtime-sh.run-script \
-		"p4rt-src/$(P4RT_PROGRAM_DIRNAME)/$(P4RT_PROGRAM_NAME).py --grpc-port=$(grpc_port) --topo-config=topo/$(topo).json"
+		"p4rt-src/$(P4RT_PROGRAM_DIRNAME)/$(P4RT_PROGRAM_NAME).py --grpc-port=$(grpc_port) --topo-config=topo/$(topo).json $(if $(filter bridge,$(P4RT_PROGRAM_NAME)),--path-id=$(path_id),)"
 
 .p4rt-logs:
 	cat logs/$(P4_PROGRAM_DIRNAME)/$(P4_PROGRAM_NAME)-$(grpc_port)-table.json
@@ -170,3 +173,20 @@ clean: .p4rt-clean .p4-clean
 .mininet-disable-vlan:
 	$(PYTHON) utils/mininet-vlan.py --scripts-dir $(SCRIPTS) --disable --topo-config topo/$(topo).json
 
+
+# Derive controller ports from the actual Clos topology in Mininet.
+.PHONY: project-config
+project-config:
+	docker run --rm -v "$(CURDIR)":/workdir -w /workdir --entrypoint python3 $(MN_STRATUM_IMG) -B project_config.py > topo/mytopo.json
+
+# Automated Clos workflow. Manual targets above remain available.
+count ?= 100
+rate ?= 100
+payload_size ?= 64
+test_timeout ?= 5
+.PHONY: project-up project-down test-paths test-paced
+project-up project-down test-paths:
+	python3 -B project/workflow.py $@
+
+test-paced:
+	python3 -B project/workflow.py $@ --path-id $(path_id) --count $(count) --rate $(rate) --payload-size $(payload_size) --timeout $(test_timeout)
