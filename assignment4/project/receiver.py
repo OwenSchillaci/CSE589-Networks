@@ -75,30 +75,31 @@ def main(argv=None):
                 except socket.timeout:
                     break
                 timestamp = time.monotonic_ns()
-                if len(data) < 8:
+                if len(data) < 10:
                     malformed += 1
                     print('short project datagram from %s' % (peer,), flush=True)
                     continue
-                step, seq, path, flags = struct.unpack('!HIBB', data[:8])
+                step, seq, path, flags, qdepth = struct.unpack('!HIBBH', data[:10])
                 duplicate, reordered = stats.record(seq, path)
-                rows.append((step, seq, path, flags, timestamp, int(duplicate), int(reordered)))
+                rows.append((step, seq, path, flags, qdepth, timestamp, int(duplicate), int(reordered)))
                 if not args.output:
-                    print('step_id=%d seq_no=%d path_id=%d flags=%d payload=%r' %
-                          (step, seq, path, flags, data[8:]), flush=True)
+                    print('step_id=%d seq_no=%d path_id=%d flags=%d qdepth=%d payload=%r' %
+                          (step, seq, path, flags, qdepth, data[10:]), flush=True)
         except KeyboardInterrupt:
             pass
     if args.output:
         with open(args.output, 'w', newline='') as output:
             writer = csv.writer(output)
-            writer.writerow(('step_id', 'seq_no', 'path_id', 'flags',
+            writer.writerow(('step_id', 'seq_no', 'path_id', 'flags', 'qdepth',
                              'receive_monotonic_ns', 'duplicate', 'out_of_order'))
             writer.writerows(rows)
-    duration = (rows[-1][4] - rows[0][4]) / 1_000_000_000 if len(rows) > 1 else 0.0
+    duration = (rows[-1][5] - rows[0][5]) / 1_000_000_000 if len(rows) > 1 else 0.0
     rate = (len(rows) - 1) / duration if duration > 0 else 0.0
     print('received=%d unique=%d duplicates=%d missing=%d out_of_order=%d malformed=%d '
-          'paths=%s duration=%.6fs actual_rate=%.2f packets/s' %
+          'paths=%s max_qdepth=%d duration=%.6fs actual_rate=%.2f packets/s' %
           (stats.received, len(stats.seen), stats.duplicates, stats.missing(),
-           stats.out_of_order, malformed, dict(stats.paths), duration, rate))
+           stats.out_of_order, malformed, dict(stats.paths),
+           max((row[4] for row in rows), default=0), duration, rate))
 
 
 if __name__ == '__main__':

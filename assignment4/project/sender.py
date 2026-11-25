@@ -34,8 +34,8 @@ def parse_args(argv=None):
         parser.error('sequence range must fit 32 bits (no wraparound)')
     # 1500-byte MTU minus IPv4, UDP, and project headers; avoid fragmentation.
     size = len(args.payload.encode()) if args.payload_size is None else args.payload_size
-    if not 0 <= size <= 1464:
-        parser.error('payload-size must be between 0 and 1464 bytes')
+    if not 0 <= size <= 1462:
+        parser.error('payload-size must be between 0 and 1462 bytes')
     args.data = args.payload.encode()[:size].ljust(size, b'\0')
     return args
 
@@ -55,7 +55,7 @@ def send_packets(sock, args):
         # Absolute deadlines avoid accumulating send/loop overhead as drift.
         wait_until(start + int(index * 1_000_000_000 / args.rate))
         seq = args.seq_no + index
-        header = struct.pack('!HIBB', args.step_id, seq, 0, args.flags)
+        header = struct.pack('!HIBBH', args.step_id, seq, 0, args.flags,0)
         timestamp = time.monotonic_ns()
         sock.sendto(header + args.data, (args.destination, 5000))
         rows.append((args.step_id, seq, timestamp))

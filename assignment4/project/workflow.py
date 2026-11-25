@@ -277,8 +277,8 @@ def main():
     parser.add_argument('--timeout', type=float, default=5)
     args = parser.parse_args()
     if (not 1 <= args.count <= 0xffffffff or not math.isfinite(args.rate) or args.rate <= 0
-            or not 0 <= args.payload_size <= 1464 or not math.isfinite(args.timeout) or args.timeout <= 0):
-        parser.error('require positive count/rate/timeout and payload-size 0..1464')
+            or not 0 <= args.payload_size <= 1462 or not math.isfinite(args.timeout) or args.timeout <= 0):
+        parser.error('require positive count/rate/timeout and payload-size 0..1462')
     os.chdir(ROOT)
     STATE.mkdir(exist_ok=True)
     with (STATE / 'workflow.lock').open('w') as lock:

@@ -46,6 +46,8 @@ header project_t {
     bit<32> seq_no;
     bit<8>  path_id;
     bit<8>  flags;
+    // T07: largest enq_qdepth seen on any switch along the path
+    bit<16> qdepth;
 }
 
 header ipv4_t {
@@ -234,6 +236,15 @@ control MyEgress(inout headers hdr,
         // Send a copy of the packet to the controller for learning
         if (standard_metadata.egress_port == CPU_PORT)
             to_controller();
+
+        // T07: This records how many packets were already waiting in this port's
+        // queue when this packet joined it. It further Keeps the maximum across S3/S1/S4.
+        if (hdr.project.isValid()) {
+            bit<16> q = (bit<16>) standard_metadata.enq_qdepth;
+            if (q > hdr.project.qdepth) {
+                hdr.project.qdepth = q;
+            }
+        }
     }
 }
 
