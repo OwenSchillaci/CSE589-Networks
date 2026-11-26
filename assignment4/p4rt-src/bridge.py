@@ -129,6 +129,8 @@ def ProcPacketIn(bridge_name, logs_dir, num_logs_threshold):
                         with contextlib.redirect_stdout(outfile):
                             p4sh.CounterEntry('MyEgress.sync_marks').read(lambda ce: print(ce))
                             p4sh.CounterEntry('MyIngress.cong_marks').read(lambda ce: print(ce))
+                            p4sh.CounterEntry('MyIngress.exclusions').read(lambda ce: print(ce))
+                            p4sh.CounterEntry('MyIngress.reroutes').read(lambda ce: print(ce))
                 except Exception as error:
                     print('WARNING: could not read counters: {0}'.format(error))
     except KeyboardInterrupt:
@@ -181,9 +183,13 @@ if __name__ == '__main__':
                 action='MyIngress.' + action)
             entry.match['hdr.ipv4.dstAddr'] = route['dst']
             entry.match['standard_metadata.ingress_port'] = str(route['ingress'])
-            entry.action['port'] = str(route['paths'][args.path_id] if selecting else route['port'])
             if selecting:
-                entry.action['path_id'] = str(args.path_id)
+                # T13: give the switch both spine ports, it picks one per packet
+                entry.action['port0'] = str(route['paths'][0])
+                entry.action['port1'] = str(route['paths'][1])
+                entry.action['pref'] = str(args.path_id)
+            else:
+                entry.action['port'] = str(route['port'])
             entry.insert()
     print('Project path: {0}'.format(args.path_id))
 

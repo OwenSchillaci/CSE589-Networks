@@ -30,6 +30,9 @@
 #define FLAG_LAST 0x08
 // T12: forget the sync state after 0.5 s with no project packets (BMv2 time is in microseconds)
 #define SYNC_IDLE_RESET 500000
+// T13: how long a path stays excluded after feedback (us), and which marks exclude it
+#define PATH_BUSY_TIME 50000
+#define EXCLUDE_ON FLAG_CONG
 /*
   255 is confirmed for opennetworking/p4mn　(Mininet/Stratum on docker)
   192 is confirmed for WEDGE-100BF-32X (2 pipes device)
@@ -87,7 +90,13 @@ header ethernet_t {
 }
 
 
-struct metadata { bit<1> unused; }
+struct metadata {
+    // T13: filled by select_path, used to choose the path per packet
+    bit<1> selected;
+    bit<9> port0;
+    bit<9> port1;
+    bit<8> pref;
+}
 
 struct headers {
     ethernet_t ethernet;
@@ -166,6 +175,11 @@ control MyIngress(inout headers hdr,
     // T12: how many packets this switch marked CONG (first switch to set it)
     counter(1, CounterType.packets) cong_marks;
 
+    // T13: per path, the time until which the path is excluded (source leaf)
+    register<bit<48>>(2) busy_until;
+    counter(1, CounterType.packets) exclusions;   // a free path became excluded
+    counter(1, CounterType.packets) reroutes;     // data packet sent on the other path
+
     action drop() {
         mark_to_drop(standard_metadata);
     }
@@ -178,9 +192,13 @@ control MyIngress(inout headers hdr,
         standard_metadata.egress_spec = port;
     }
 
-    action select_path(bit<9> port, bit<8> path_id) {
-        standard_metadata.egress_spec = port;
-        hdr.project.path_id = path_id;
+    // T13: the controller gives both spine ports and the preferred path,
+    // the real choice is made in apply() after looking at busy_until
+    action select_path(bit<9> port0, bit<9> port1, bit<8> pref) {
+        meta.selected = 1;
+        meta.port0 = port0;
+        meta.port1 = port1;
+        meta.pref = pref;
     }
 
     // Entries on source leaves select a path; transit/destination entries
@@ -214,10 +232,51 @@ control MyIngress(inout headers hdr,
         } else if (hdr.project.isValid()) {
             // T09: feedback carries the forward path_id, remember it before the table runs
             bit<8> fwd_path = hdr.project.path_id;
+            meta.selected = 0;
             project_forward.apply();
+            bit<48> now = standard_metadata.ingress_global_timestamp;
+
+            if (meta.selected == 1) {
+                // T13: we are the source leaf, pick the path for this packet
+                bit<8> chosen = meta.pref;
+                if ((hdr.project.flags & FLAG_FEEDBACK) == 0) {
+                    bit<48> b0;
+                    bit<48> b1;
+                    busy_until.read(b0, 0);
+                    busy_until.read(b1, 1);
+                    bool busy0 = b0 > now;
+                    bool busy1 = b1 > now;
+                    // preferred path is excluded and the other one is free -> use the other
+                    if (meta.pref == 0 && busy0 && !busy1) {
+                        chosen = 1;
+                    } else if (meta.pref == 1 && busy1 && !busy0) {
+                        chosen = 0;
+                    }
+                    if (chosen != meta.pref) {
+                        reroutes.count(0);
+                    }
+                }
+                if (chosen == 0) {
+                    standard_metadata.egress_spec = meta.port0;
+                } else {
+                    standard_metadata.egress_spec = meta.port1;
+                }
+                hdr.project.path_id = chosen;
+            }
+
             // select_path on the way back would overwrite it, so put it back
             if ((hdr.project.flags & FLAG_FEEDBACK) != 0) {
                 hdr.project.path_id = fwd_path;
+                // T13: feedback reached the leaf of the original sender (not chosen
+                // by select_path here), so exclude the forward path it names
+                if (meta.selected == 0 && (hdr.project.flags & EXCLUDE_ON) != 0) {
+                    bit<48> old_busy;
+                    busy_until.read(old_busy, (bit<32>) fwd_path);
+                    if (old_busy <= now) {
+                        exclusions.count(0);
+                    }
+                    busy_until.write((bit<32>) fwd_path, now + PATH_BUSY_TIME);
+                }
             }
             // T11: if the slow cable marked ECN CE (11) on this packet, save the
             // cause in our own CONG flag so it is not mixed up with SYNC later
