@@ -163,6 +163,9 @@ control MyIngress(inout headers hdr,
                   inout metadata meta,
                   inout standard_metadata_t standard_metadata) {
 
+    // T12: how many packets this switch marked CONG (first switch to set it)
+    counter(1, CounterType.packets) cong_marks;
+
     action drop() {
         mark_to_drop(standard_metadata);
     }
@@ -219,6 +222,9 @@ control MyIngress(inout headers hdr,
             // T11: if the slow cable marked ECN CE (11) on this packet, save the
             // cause in our own CONG flag so it is not mixed up with SYNC later
             if ((hdr.ipv4.diffserv & 0x03) == 0x03) {
+                if ((hdr.project.flags & FLAG_CONG) == 0) {
+                    cong_marks.count(0);
+                }
                 hdr.project.flags = hdr.project.flags | FLAG_CONG;
             }
             // IPv4 permits checksum zero (UDP checksum disabled). No IP
@@ -251,6 +257,8 @@ control MyEgress(inout headers hdr,
     register<bit<16>>(1) sync_step_min;   // slowest step still running
     register<bit<32>>(1) sync_psn_rec;    // highest seq_no seen in step_min
     register<bit<48>>(1) sync_last_seen;  // T12: time of the last data packet
+    // T12: how many packets this switch marked SYNC (first switch to set it)
+    counter(1, CounterType.packets) sync_marks;
 
     apply {
         // Prune multicast packets going to ingress port to prevent loops
@@ -311,6 +319,9 @@ control MyEgress(inout headers hdr,
                 }
             }
             if (step > step_min) {
+                if ((hdr.project.flags & FLAG_SYNC) == 0) {
+                    sync_marks.count(0);
+                }
                 hdr.project.flags = hdr.project.flags | FLAG_SYNC;
             }
 

@@ -123,6 +123,14 @@ def ProcPacketIn(bridge_name, logs_dir, num_logs_threshold):
                         p4sh.TableEntry('MyIngress.bridge_table').read(lambda te: print(te))
                 print(
                     "INFO: Log committed to {0}/{1}-table.json".format(logs_dir, bridge_name))
+                # T12: also save how many packets this switch marked SYNC / CONG
+                try:
+                    with open('{0}/{1}-counters.txt'.format(logs_dir, bridge_name), 'w') as outfile:
+                        with contextlib.redirect_stdout(outfile):
+                            p4sh.CounterEntry('MyEgress.sync_marks').read(lambda ce: print(ce))
+                            p4sh.CounterEntry('MyIngress.cong_marks').read(lambda ce: print(ce))
+                except Exception as error:
+                    print('WARNING: could not read counters: {0}'.format(error))
     except KeyboardInterrupt:
         return None
 
