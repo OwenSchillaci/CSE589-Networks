@@ -50,14 +50,21 @@ def wait_until(deadline_ns):
         time.sleep(remaining / 1_000_000_000)
 
 
-def read_feedback(sock, fb, wait=False):
+def read_feedback(sock, fb, deadline=None):
     # T09: read feedback packets from the receiver without blocking the sending loop
+    # T16: with a deadline, keep reading until that time (used by listen)
     while True:
         try:
-            if wait:
+            if deadline is not None:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return
+                sock.settimeout(left)
                 data = sock.recv(2048)
             else:
-                data = sock.recv(2048, socket.MSG_DONTWAIT)
+                # timeout 0 = do not wait at all (listen() may have left a timeout on the socket)
+                sock.settimeout(0)
+                data = sock.recv(2048)
         except (BlockingIOError, socket.timeout):
             return
         if len(data) < 10:
@@ -65,12 +72,54 @@ def read_feedback(sock, fb, wait=False):
         step, seq, path, flags, qdepth = struct.unpack('!HIBBH', data[:10])
         if not flags & 0x04:
             continue
+        if flags & 0x10:
+            # T16: ACK = highest seq the receiver has + list of missing seqs in the payload
+            count = struct.unpack('!H', data[10:12])[0]
+            missing = struct.unpack('!%dI' % count, data[12:12 + 4 * count])
+            fb['acks'] += 1
+            fb['ack'] = (seq, missing)
+            continue
         fb['total'] += 1
         fb['path%d' % path] = fb.get('path%d' % path, 0) + 1
         if flags & 0x02:
             fb['cong'] += 1
         if flags & 0x01:
             fb['sync'] += 1
+
+
+def listen(sock, fb, seconds):
+    # T16: read feedback and ACKs for a fixed time
+    read_feedback(sock, fb, deadline=time.monotonic() + seconds)
+
+
+def recover(sock, args, fb, start):
+    # T16: after the first pass, ask the latest ACK what is missing and resend it
+    last = args.seq_no + args.count - 1
+    deadline = time.monotonic() + 15
+    listen(sock, fb, 0.2)   # late or reordered packets can still arrive
+    while time.monotonic() < deadline:
+        # use the newest ACK (the final "nothing missing" one may already be here)
+        listen(sock, fb, 0.1)
+        if fb['ack'] is None:
+            continue
+        highest, missing = fb['ack']
+        todo = sorted(set(missing) | set(range(highest + 1, last + 1)))
+        if not todo:
+            fb['complete'] = True
+            fb['completion'] = (time.monotonic_ns() - start) / 1_000_000_000
+            return
+        fb['rounds'] += 1
+        resend_start = time.monotonic_ns()
+        for index, seq in enumerate(todo):
+            wait_until(resend_start + int(index * 1_000_000_000 / args.rate))
+            flags = args.flags
+            if args.last and seq == last:
+                flags = flags | 0x08
+            header = struct.pack('!HIBBH', args.step_id, seq, 0, flags, 0)
+            sock.sendto(header + args.data, (args.destination, 5000))
+            fb['retransmitted'] += 1
+            read_feedback(sock, fb)
+        listen(sock, fb, 0.2)
 
 
 def send_packets(sock, args, fb):
@@ -88,9 +137,9 @@ def send_packets(sock, args, fb):
         sock.sendto(header + args.data, (args.destination, 5000))
         rows.append((args.step_id, seq, timestamp))
         read_feedback(sock, fb)
+    recover(sock, args, fb, start)
     # wait a bit for the last feedback packets to come back
-    sock.settimeout(1.0)
-    read_feedback(sock, fb, wait=True)
+    listen(sock, fb, 0.5)
     return rows
 
 
@@ -101,7 +150,8 @@ def main(argv=None):
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, 0x02)
         # listen on 5000 too, the receiver sends feedback here
         sock.bind(('0.0.0.0', 5000))
-        fb = {'total': 0, 'cong': 0, 'sync': 0}
+        fb = {'total': 0, 'cong': 0, 'sync': 0, 'acks': 0, 'ack': None,
+              'rounds': 0, 'retransmitted': 0, 'complete': False, 'completion': 0.0}
         rows = send_packets(sock, args, fb)
     if args.output:
         with open(args.output, 'w', newline='') as output:
@@ -114,6 +164,8 @@ def main(argv=None):
           (len(rows), duration, rate))
     print('feedback=%d cong=%d sync=%d path0=%d path1=%d' %
           (fb['total'], fb['cong'], fb['sync'], fb.get('path0', 0), fb.get('path1', 0)))
+    print('acks=%d retransmitted=%d rounds=%d complete=%s completion=%.3fs' %
+          (fb['acks'], fb['retransmitted'], fb['rounds'], fb['complete'], fb['completion']))
 
 
 if __name__ == '__main__':

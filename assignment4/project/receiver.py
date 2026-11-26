@@ -65,18 +65,39 @@ def main(argv=None):
     rows = []
     malformed = 0
     feedback_sent = 0
+    acks_sent = 0
+    sender = None
+    last_step = 0
+    last_ack = time.monotonic()
+    last_data = time.monotonic()
+
+    def send_ack():
+        # T16: tell the sender the highest seq we have and which ones are still missing
+        highest = stats.highest or 0
+        missing = [s for s in range(stats.first_seq, highest + 1) if s not in stats.seen][:350]
+        header = struct.pack('!HIBBH', last_step, highest, 0, 0x04 | 0x10, 0)
+        sock.sendto(header + struct.pack('!H%dI' % len(missing), len(missing), *missing), (sender, 5000))
+
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.bind(('0.0.0.0', 5000))
         # ask Linux to give us the TOS byte of each packet so we can see the ECN bits
         sock.setsockopt(socket.IPPROTO_IP, getattr(socket, 'IP_RECVTOS', 13), 1)
-        sock.settimeout(args.timeout)
+        sock.settimeout(0.05)
         print('Listening on UDP port 5000', flush=True)
         try:
             while not stats.complete():
+                # T16: ACK every 50 ms while data is coming
+                if sender and time.monotonic() - last_ack >= 0.05:
+                    send_ack()
+                    acks_sent += 1
+                    last_ack = time.monotonic()
                 try:
                     data, ancdata, _, peer = sock.recvmsg(65535, socket.CMSG_SPACE(1))
                 except socket.timeout:
-                    break
+                    if args.timeout is not None and time.monotonic() - last_data > args.timeout:
+                        break
+                    continue
+                last_data = time.monotonic()
                 timestamp = time.monotonic_ns()
                 # ECN is the last 2 bits of TOS: 2 = ECT (not marked), 3 = CE (marked by RED)
                 ecn = 0
@@ -88,6 +109,8 @@ def main(argv=None):
                     print('short project datagram from %s' % (peer,), flush=True)
                     continue
                 step, seq, path, flags, qdepth = struct.unpack('!HIBBH', data[:10])
+                sender = peer[0]
+                last_step = step
                 duplicate, reordered = stats.record(seq, path)
                 rows.append((step, seq, path, flags, qdepth, timestamp, int(duplicate), int(reordered), ecn))
                 # T09: packet has a mark (SYNC 0x01 or CONG 0x02) -> send feedback back to the sender
@@ -100,6 +123,11 @@ def main(argv=None):
                 if not args.output:
                     print('step_id=%d seq_no=%d path_id=%d flags=%d qdepth=%d payload=%r' %
                           (step, seq, path, flags, qdepth, data[10:]), flush=True)
+            # T16: all data is here, send the final ACK a few times in case one is lost
+            if sender and stats.complete():
+                for _ in range(3):
+                    send_ack()
+                    acks_sent += 1
         except KeyboardInterrupt:
             pass
     if args.output:
@@ -111,12 +139,12 @@ def main(argv=None):
     duration = (rows[-1][5] - rows[0][5]) / 1_000_000_000 if len(rows) > 1 else 0.0
     rate = (len(rows) - 1) / duration if duration > 0 else 0.0
     print('received=%d unique=%d duplicates=%d missing=%d out_of_order=%d malformed=%d '
-          'paths=%s max_qdepth=%d ce_marked=%d cong_flag=%d feedback_sent=%d duration=%.6fs actual_rate=%.2f packets/s' %
+          'paths=%s max_qdepth=%d ce_marked=%d cong_flag=%d feedback_sent=%d acks_sent=%d duration=%.6fs actual_rate=%.2f packets/s' %
           (stats.received, len(stats.seen), stats.duplicates, stats.missing(),
            stats.out_of_order, malformed, dict(stats.paths),
            max((row[4] for row in rows), default=0),
            sum(row[8] == 3 for row in rows),
-           sum((row[3] & 0x02) != 0 for row in rows), feedback_sent, duration, rate))
+           sum((row[3] & 0x02) != 0 for row in rows), feedback_sent, acks_sent, duration, rate))
 
 
 if __name__ == '__main__':
