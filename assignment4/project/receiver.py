@@ -103,11 +103,12 @@ def main(argv=None):
     duration = (rows[-1][5] - rows[0][5]) / 1_000_000_000 if len(rows) > 1 else 0.0
     rate = (len(rows) - 1) / duration if duration > 0 else 0.0
     print('received=%d unique=%d duplicates=%d missing=%d out_of_order=%d malformed=%d '
-          'paths=%s max_qdepth=%d ce_marked=%d duration=%.6fs actual_rate=%.2f packets/s' %
+          'paths=%s max_qdepth=%d ce_marked=%d cong_flag=%d duration=%.6fs actual_rate=%.2f packets/s' %
           (stats.received, len(stats.seen), stats.duplicates, stats.missing(),
            stats.out_of_order, malformed, dict(stats.paths),
            max((row[4] for row in rows), default=0),
-           sum(row[8] == 3 for row in rows), duration, rate))
+           sum(row[8] == 3 for row in rows),
+           sum((row[3] & 0x02) != 0 for row in rows), duration, rate))
 
 
 if __name__ == '__main__':

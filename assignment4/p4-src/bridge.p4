@@ -23,6 +23,10 @@
 
 #define MCAST_ID 1
 #define CPU_PORT 255
+// bits in hdr.project.flags (T11)
+#define FLAG_SYNC 0x01
+#define FLAG_CONG 0x02
+#define FLAG_FEEDBACK 0x04
 /*
   255 is confirmed for opennetworking/p4mn　(Mininet/Stratum on docker)
   192 is confirmed for WEDGE-100BF-32X (2 pipes device)
@@ -203,6 +207,11 @@ control MyIngress(inout headers hdr,
             drop();
         } else if (hdr.project.isValid()) {
             project_forward.apply();
+            // T11: if the slow cable marked ECN CE (11) on this packet, save the
+            // cause in our own CONG flag so it is not mixed up with SYNC later
+            if ((hdr.ipv4.diffserv & 0x03) == 0x03) {
+                hdr.project.flags = hdr.project.flags | FLAG_CONG;
+            }
             // IPv4 permits checksum zero (UDP checksum disabled). No IP
             // fields change, so the original IPv4 checksum remains valid.
             hdr.udp.checksum = 0;
