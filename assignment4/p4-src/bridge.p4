@@ -28,6 +28,8 @@
 #define FLAG_CONG 0x02
 #define FLAG_FEEDBACK 0x04
 #define FLAG_LAST 0x08
+// T12: forget the sync state after 0.5 s with no project packets (BMv2 time is in microseconds)
+#define SYNC_IDLE_RESET 500000
 /*
   255 is confirmed for opennetworking/p4mn　(Mininet/Stratum on docker)
   192 is confirmed for WEDGE-100BF-32X (2 pipes device)
@@ -248,6 +250,7 @@ control MyEgress(inout headers hdr,
     register<bit<1>>(1)  sync_started;
     register<bit<16>>(1) sync_step_min;   // slowest step still running
     register<bit<32>>(1) sync_psn_rec;    // highest seq_no seen in step_min
+    register<bit<48>>(1) sync_last_seen;  // T12: time of the last data packet
 
     apply {
         // Prune multicast packets going to ingress port to prevent loops
@@ -278,6 +281,15 @@ control MyEgress(inout headers hdr,
             sync_psn_rec.read(psn_rec, 0);
             bit<16> step = hdr.project.step_id;
             bit<32> seq = hdr.project.seq_no;
+
+            // T12: long gap since the last packet = a new trial, so start fresh
+            bit<48> now = standard_metadata.egress_global_timestamp;
+            bit<48> last_seen;
+            sync_last_seen.read(last_seen, 0);
+            if (now - last_seen > SYNC_IDLE_RESET) {
+                started = 0;
+            }
+            sync_last_seen.write(0, now);
 
             // first packet ever: start from its step
             if (started == 0) {
