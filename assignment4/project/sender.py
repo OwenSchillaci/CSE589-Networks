@@ -65,6 +65,8 @@ def send_packets(sock, args):
 def main(argv=None):
     args = parse_args(argv)
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        # set ECT(0) in the IP header so RED marks our packets instead of dropping them
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, 0x02)
         rows = send_packets(sock, args)
     if args.output:
         with open(args.output, 'w', newline='') as output:

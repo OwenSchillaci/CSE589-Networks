@@ -66,22 +66,29 @@ def main(argv=None):
     malformed = 0
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.bind(('0.0.0.0', 5000))
+        # ask Linux to give us the TOS byte of each packet so we can see the ECN bits
+        sock.setsockopt(socket.IPPROTO_IP, getattr(socket, 'IP_RECVTOS', 13), 1)
         sock.settimeout(args.timeout)
         print('Listening on UDP port 5000', flush=True)
         try:
             while not stats.complete():
                 try:
-                    data, peer = sock.recvfrom(65535)
+                    data, ancdata, _, peer = sock.recvmsg(65535, socket.CMSG_SPACE(1))
                 except socket.timeout:
                     break
                 timestamp = time.monotonic_ns()
+                # ECN is the last 2 bits of TOS: 2 = ECT (not marked), 3 = CE (marked by RED)
+                ecn = 0
+                for level, kind, value in ancdata:
+                    if level == socket.IPPROTO_IP and kind == socket.IP_TOS and value:
+                        ecn = value[0] & 0x03
                 if len(data) < 10:
                     malformed += 1
                     print('short project datagram from %s' % (peer,), flush=True)
                     continue
                 step, seq, path, flags, qdepth = struct.unpack('!HIBBH', data[:10])
                 duplicate, reordered = stats.record(seq, path)
-                rows.append((step, seq, path, flags, qdepth, timestamp, int(duplicate), int(reordered)))
+                rows.append((step, seq, path, flags, qdepth, timestamp, int(duplicate), int(reordered), ecn))
                 if not args.output:
                     print('step_id=%d seq_no=%d path_id=%d flags=%d qdepth=%d payload=%r' %
                           (step, seq, path, flags, qdepth, data[10:]), flush=True)
@@ -91,15 +98,16 @@ def main(argv=None):
         with open(args.output, 'w', newline='') as output:
             writer = csv.writer(output)
             writer.writerow(('step_id', 'seq_no', 'path_id', 'flags', 'qdepth',
-                             'receive_monotonic_ns', 'duplicate', 'out_of_order'))
+                             'receive_monotonic_ns', 'duplicate', 'out_of_order', 'ecn'))
             writer.writerows(rows)
     duration = (rows[-1][5] - rows[0][5]) / 1_000_000_000 if len(rows) > 1 else 0.0
     rate = (len(rows) - 1) / duration if duration > 0 else 0.0
     print('received=%d unique=%d duplicates=%d missing=%d out_of_order=%d malformed=%d '
-          'paths=%s max_qdepth=%d duration=%.6fs actual_rate=%.2f packets/s' %
+          'paths=%s max_qdepth=%d ce_marked=%d duration=%.6fs actual_rate=%.2f packets/s' %
           (stats.received, len(stats.seen), stats.duplicates, stats.missing(),
            stats.out_of_order, malformed, dict(stats.paths),
-           max((row[4] for row in rows), default=0), duration, rate))
+           max((row[4] for row in rows), default=0),
+           sum(row[8] == 3 for row in rows), duration, rate))
 
 
 if __name__ == '__main__':
