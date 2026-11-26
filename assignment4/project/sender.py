@@ -81,6 +81,11 @@ def read_feedback(sock, fb, deadline=None):
             fb['acks'] += 1
             fb['ack'] = (seq, missing)
             continue
+        if flags & 0x20:
+            fb['rtt'] = fb.get('rtt', 0) + 1
+        # T14: an RTT reply with no mark is not a mark, so it must not cut the rate
+        if not flags & 0x03:
+            continue
         fb['total'] += 1
         fb['path%d' % path] = fb.get('path%d' % path, 0) + 1
         if flags & 0x02:
@@ -191,8 +196,8 @@ def main(argv=None):
     rate = (len(rows) - 1) / duration if duration > 0 else 0.0
     print('sent=%d duration=%.6fs actual_rate=%.2f packets/s' %
           (len(rows), duration, rate))
-    print('feedback=%d cong=%d sync=%d path0=%d path1=%d' %
-          (fb['total'], fb['cong'], fb['sync'], fb.get('path0', 0), fb.get('path1', 0)))
+    print('feedback=%d cong=%d sync=%d path0=%d path1=%d rtt_replies=%d' %
+          (fb['total'], fb['cong'], fb['sync'], fb.get('path0', 0), fb.get('path1', 0), fb.get('rtt', 0)))
     print('acks=%d retransmitted=%d rounds=%d complete=%s completion=%.3fs' %
           (fb['acks'], fb['retransmitted'], fb['rounds'], fb['complete'], fb['completion']))
     if args.cc:

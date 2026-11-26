@@ -116,8 +116,10 @@ def main(argv=None):
                 # T09: packet has a mark (SYNC 0x01 or CONG 0x02) -> send feedback back to the sender
                 # keep path_id = the forward path, copy the mark bits, add FEEDBACK 0x04
                 marks = flags & 0x03
-                if marks:
-                    feedback = struct.pack('!HIBBH', step, seq, path, marks | 0x04, qdepth)
+                # T14: RTT request (0x20) -> answer right away, the reply keeps the 0x20 bit
+                rtt = flags & 0x20
+                if marks or rtt:
+                    feedback = struct.pack('!HIBBH', step, seq, path, marks | rtt | 0x04, qdepth)
                     sock.sendto(feedback, (peer[0], 5000))
                     feedback_sent += 1
                 if not args.output:

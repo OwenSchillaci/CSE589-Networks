@@ -131,6 +131,9 @@ def ProcPacketIn(bridge_name, logs_dir, num_logs_threshold):
                             p4sh.CounterEntry('MyIngress.cong_marks').read(lambda ce: print(ce))
                             p4sh.CounterEntry('MyIngress.exclusions').read(lambda ce: print(ce))
                             p4sh.CounterEntry('MyIngress.reroutes').read(lambda ce: print(ce))
+                            p4sh.CounterEntry('MyIngress.rtt_requests').read(lambda ce: print(ce))
+                            p4sh.CounterEntry('MyIngress.rtt_slow').read(lambda ce: print(ce))
+                            p4sh.CounterEntry('MyIngress.no_alternative').read(lambda ce: print(ce))
                 except Exception as error:
                     print('WARNING: could not read counters: {0}'.format(error))
     except KeyboardInterrupt:

@@ -28,11 +28,19 @@
 #define FLAG_CONG 0x02
 #define FLAG_FEEDBACK 0x04
 #define FLAG_LAST 0x08
+// T14: on data = RTT request, on feedback = RTT reply (0x10 is ACK, used by the hosts)
+#define FLAG_RTT 0x20
 // T12: forget the sync state after 0.5 s with no project packets (BMv2 time is in microseconds)
 #define SYNC_IDLE_RESET 500000
 // T13: how long a path stays excluded after feedback (us), and which marks exclude it
 #define PATH_BUSY_TIME 50000
 #define EXCLUDE_ON FLAG_CONG   // default = separated mode
+// T14: a flow can change path only at the start of a chunk (seq_no % 64 == 0)
+#define CHUNK_MASK 63
+// T14: RTT above this (us) means the path is slow; normal RTT here is about 1-2 ms
+#define RTT_LIMIT 20000
+// T14: after a slow RTT this flow avoids that path for 0.5 s (longer than one chunk)
+#define RTT_BAD_TIME 500000
 /*
   255 is confirmed for opennetworking/p4mn　(Mininet/Stratum on docker)
   192 is confirmed for WEDGE-100BF-32X (2 pipes device)
@@ -180,7 +188,18 @@ control MyIngress(inout headers hdr,
     // T13: per path, the time until which the path is excluded (source leaf)
     register<bit<48>>(2) busy_until;
     counter(1, CounterType.packets) exclusions;   // a free path became excluded
-    counter(1, CounterType.packets) reroutes;     // data packet sent on the other path
+    counter(1, CounterType.packets) reroutes;     // T14: a flow moved to the other path
+
+    // T14: per flow state at the source leaf, flow index = (src host, dst host)
+    register<bit<1>>(64)  flow_has_path;
+    register<bit<8>>(64)  flow_path;     // path the flow is on right now
+    register<bit<48>>(64) rtt_sent;      // time the RTT request left, 0 = none out
+    register<bit<8>>(64)  rtt_path;      // path the RTT request went on
+    register<bit<48>>(64) flow_last_seen;
+    register<bit<48>>(128) rtt_bad_until;  // index flow*2 + path, slow for this flow until then
+    counter(1, CounterType.packets) rtt_requests;
+    counter(1, CounterType.packets) rtt_slow;        // reply too late or never came
+    counter(1, CounterType.packets) no_alternative;  // wanted to move but both paths busy
 
     action drop() {
         mark_to_drop(standard_metadata);
@@ -253,21 +272,70 @@ control MyIngress(inout headers hdr,
                 // T13: we are the source leaf, pick the path for this packet
                 bit<8> chosen = meta.pref;
                 if ((hdr.project.flags & FLAG_FEEDBACK) == 0) {
+                    bit<32> flow = (((bit<32>) hdr.ipv4.srcAddr & 7) << 3) | ((bit<32>) hdr.ipv4.dstAddr & 7);
+                    bit<1> has;
+                    bit<8> cur;
+                    bit<48> sent;
+                    flow_has_path.read(has, flow);
+                    flow_path.read(cur, flow);
+                    rtt_sent.read(sent, flow);
+                    // T14: like T12, a 0.5 s gap = a new trial, start again on the preferred path
+                    bit<48> fseen;
+                    flow_last_seen.read(fseen, flow);
+                    if (now - fseen > SYNC_IDLE_RESET) {
+                        has = 0;
+                        sent = 0;
+                    }
+                    flow_last_seen.write(flow, now);
+                    if (has == 0) {
+                        cur = meta.pref;
+                    }
+
+                    // T14: RTT request still not back after RTT_LIMIT -> that path is slow
+                    if (sent != 0 && now - sent > RTT_LIMIT) {
+                        bit<8> rp;
+                        rtt_path.read(rp, flow);
+                        rtt_bad_until.write(flow * 2 + (bit<32>) rp, now + RTT_BAD_TIME);
+                        rtt_slow.count(0);
+                        sent = 0;
+                    }
+
                     bit<48> b0;
                     bit<48> b1;
                     busy_until.read(b0, 0);
                     busy_until.read(b1, 1);
-                    bool busy0 = b0 > now;
-                    bool busy1 = b1 > now;
-                    // preferred path is excluded and the other one is free -> use the other
-                    if (meta.pref == 0 && busy0 && !busy1) {
-                        chosen = 1;
-                    } else if (meta.pref == 1 && busy1 && !busy0) {
-                        chosen = 0;
+                    // T14: RTT says slow for this flow, or CONG excluded it for everyone (T13)
+                    bit<48> r0;
+                    bit<48> r1;
+                    rtt_bad_until.read(r0, flow * 2);
+                    rtt_bad_until.read(r1, flow * 2 + 1);
+                    bool busy0 = b0 > now || r0 > now;
+                    bool busy1 = b1 > now || r1 > now;
+
+                    // T14: only at the first packet of a chunk can the flow change path,
+                    // so one chunk never gets split over two paths
+                    if ((hdr.project.seq_no & CHUNK_MASK) == 0) {
+                        bool cur_busy = (cur == 0 && busy0) || (cur == 1 && busy1);
+                        bool other_busy = (cur == 0 && busy1) || (cur == 1 && busy0);
+                        if (cur_busy && !other_busy) {
+                            cur = cur ^ 1;
+                            reroutes.count(0);
+                        } else if (cur_busy) {
+                            // both paths are excluded, nowhere better to go, stay
+                            no_alternative.count(0);
+                        }
+                        // one RTT request per chunk, only when the last one is back
+                        if (sent == 0) {
+                            hdr.project.flags = hdr.project.flags | FLAG_RTT;
+                            sent = now;
+                            rtt_path.write(flow, cur);
+                            rtt_requests.count(0);
+                        }
                     }
-                    if (chosen != meta.pref) {
-                        reroutes.count(0);
-                    }
+                    flow_has_path.write(flow, 1);
+                    flow_path.write(flow, cur);
+                    rtt_sent.write(flow, sent);
+                    chosen = cur;
                 }
                 if (chosen == 0) {
                     standard_metadata.egress_spec = meta.port0;
@@ -289,6 +357,23 @@ control MyIngress(inout headers hdr,
                         exclusions.count(0);
                     }
                     busy_until.write((bit<32>) fwd_path, now + PATH_BUSY_TIME);
+                }
+                // T14: RTT reply back at the sender's leaf. The reply goes dst -> src,
+                // so swap the addresses to find the sender's flow
+                if (meta.selected == 0 && (hdr.project.flags & FLAG_RTT) != 0) {
+                    bit<32> rflow = (((bit<32>) hdr.ipv4.dstAddr & 7) << 3) | ((bit<32>) hdr.ipv4.srcAddr & 7);
+                    bit<48> rsent;
+                    rtt_sent.read(rsent, rflow);
+                    if (rsent != 0) {
+                        if (now - rsent > RTT_LIMIT) {
+                            rtt_bad_until.write(rflow * 2 + (bit<32>) fwd_path, now + RTT_BAD_TIME);
+                            rtt_slow.count(0);
+                        } else {
+                            // RTT is fine again on this path
+                            rtt_bad_until.write(rflow * 2 + (bit<32>) fwd_path, 0);
+                        }
+                        rtt_sent.write(rflow, 0);
+                    }
                 }
             }
             // T11: if the slow cable marked ECN CE (11) on this packet, save the
