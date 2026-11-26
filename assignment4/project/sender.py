@@ -22,6 +22,8 @@ def parse_args(argv=None):
     parser.add_argument('--flags', type=int, default=0)
     # T10: put LAST (0x08) on the final packet so the switch knows the step is finished
     parser.add_argument('--last', action='store_true')
+    # T18: slow down on SYNC or CONG feedback (simple DCQCN-like rule), off by default
+    parser.add_argument('--cc', action='store_true')
     parser.add_argument('--payload', default='hello')
     parser.add_argument('--count', type=int, default=1)
     parser.add_argument('--rate', type=positive_rate, default=100.0)
@@ -122,12 +124,37 @@ def recover(sock, args, fb, start):
         listen(sock, fb, 0.2)
 
 
+def adjust_rate(args, fb, cc, now):
+    # T18: same rule for SYNC and CONG, and for shared and separated mode
+    # new mark and last cut was >= 50 ms ago -> cut rate in half
+    # no new mark for 50 ms                  -> add 5% of the start rate back
+    if fb['total'] > cc['marks'] and now - cc['last_cut'] >= 50_000_000:
+        cc['rate'] = max(cc['min'], cc['rate'] * 0.5)
+        cc['marks'] = fb['total']
+        cc['last_cut'] = now
+        cc['last_up'] = now
+        cc['cuts'] += 1
+    elif fb['total'] == cc['marks'] and now - cc['last_up'] >= 50_000_000:
+        cc['rate'] = min(args.rate, cc['rate'] + 0.05 * args.rate)
+        cc['last_up'] = now
+    cc['lowest'] = min(cc['lowest'], cc['rate'])
+
+
 def send_packets(sock, args, fb):
     rows = []
     start = time.monotonic_ns()
+    cc = {'rate': args.rate, 'min': max(1.0, 0.02 * args.rate), 'marks': 0,
+          'last_cut': 0, 'last_up': start, 'cuts': 0, 'lowest': args.rate}
+    fb['cc'] = cc
+    next_send = start
     for index in range(args.count):
-        # Absolute deadlines avoid accumulating send/loop overhead as drift.
-        wait_until(start + int(index * 1_000_000_000 / args.rate))
+        if args.cc:
+            # T18: the gap to the next packet depends on the current rate
+            wait_until(next_send)
+            next_send = max(next_send, time.monotonic_ns()) + int(1_000_000_000 / cc['rate'])
+        else:
+            # Absolute deadlines avoid accumulating send/loop overhead as drift.
+            wait_until(start + int(index * 1_000_000_000 / args.rate))
         seq = args.seq_no + index
         flags = args.flags
         if args.last and index == args.count - 1:
@@ -135,8 +162,10 @@ def send_packets(sock, args, fb):
         header = struct.pack('!HIBBH', args.step_id, seq, 0, flags, 0)
         timestamp = time.monotonic_ns()
         sock.sendto(header + args.data, (args.destination, 5000))
-        rows.append((args.step_id, seq, timestamp))
+        rows.append((args.step_id, seq, timestamp, round(cc['rate'], 1)))
         read_feedback(sock, fb)
+        if args.cc:
+            adjust_rate(args, fb, cc, time.monotonic_ns())
     recover(sock, args, fb, start)
     # wait a bit for the last feedback packets to come back
     listen(sock, fb, 0.5)
@@ -156,7 +185,7 @@ def main(argv=None):
     if args.output:
         with open(args.output, 'w', newline='') as output:
             writer = csv.writer(output)
-            writer.writerow(('step_id', 'seq_no', 'send_monotonic_ns'))
+            writer.writerow(('step_id', 'seq_no', 'send_monotonic_ns', 'rate'))
             writer.writerows(rows)
     duration = (rows[-1][2] - rows[0][2]) / 1_000_000_000
     rate = (len(rows) - 1) / duration if duration > 0 else 0.0
@@ -166,6 +195,10 @@ def main(argv=None):
           (fb['total'], fb['cong'], fb['sync'], fb.get('path0', 0), fb.get('path1', 0)))
     print('acks=%d retransmitted=%d rounds=%d complete=%s completion=%.3fs' %
           (fb['acks'], fb['retransmitted'], fb['rounds'], fb['complete'], fb['completion']))
+    if args.cc:
+        cc = fb['cc']
+        print('cc=on cuts=%d lowest_rate=%.1f final_rate=%.1f packets/s' %
+              (cc['cuts'], cc['lowest'], cc['rate']))
 
 
 if __name__ == '__main__':
