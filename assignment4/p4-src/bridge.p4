@@ -27,6 +27,7 @@
 #define FLAG_SYNC 0x01
 #define FLAG_CONG 0x02
 #define FLAG_FEEDBACK 0x04
+#define FLAG_LAST 0x08
 /*
   255 is confirmed for opennetworking/p4mn　(Mininet/Stratum on docker)
   192 is confirmed for WEDGE-100BF-32X (2 pipes device)
@@ -243,6 +244,11 @@ control MyEgress(inout headers hdr,
         hdr.packet_in.ingress_port = standard_metadata.ingress_port;
     }
 
+    // T10: Symphony-style progress state, one job only so index 0
+    register<bit<1>>(1)  sync_started;
+    register<bit<16>>(1) sync_step_min;   // slowest step still running
+    register<bit<32>>(1) sync_psn_rec;    // highest seq_no seen in step_min
+
     apply {
         // Prune multicast packets going to ingress port to prevent loops
         if (standard_metadata.egress_port == standard_metadata.ingress_port)
@@ -259,6 +265,46 @@ control MyEgress(inout headers hdr,
             if (q > hdr.project.qdepth) {
                 hdr.project.qdepth = q;
             }
+        }
+
+        // T10: mark SYNC on data packets whose step is ahead of step_min
+        // (feedback packets only echo a step, so skip them)
+        if (hdr.project.isValid() && (hdr.project.flags & FLAG_FEEDBACK) == 0) {
+            bit<1> started;
+            bit<16> step_min;
+            bit<32> psn_rec;
+            sync_started.read(started, 0);
+            sync_step_min.read(step_min, 0);
+            sync_psn_rec.read(psn_rec, 0);
+            bit<16> step = hdr.project.step_id;
+            bit<32> seq = hdr.project.seq_no;
+
+            // first packet ever: start from its step
+            if (started == 0) {
+                started = 1;
+                step_min = step;
+                psn_rec = 0;
+            }
+            if ((hdr.project.flags & FLAG_LAST) != 0) {
+                // this step is finished, the next one becomes the slowest
+                step_min = step + 1;
+                psn_rec = 0;
+            } else if (step < step_min) {
+                // a lagging packet, go back to its step
+                step_min = step;
+                psn_rec = seq;
+            } else if (step == step_min) {
+                if (seq > psn_rec) {
+                    psn_rec = seq;
+                }
+            }
+            if (step > step_min) {
+                hdr.project.flags = hdr.project.flags | FLAG_SYNC;
+            }
+
+            sync_started.write(0, started);
+            sync_step_min.write(0, step_min);
+            sync_psn_rec.write(0, psn_rec);
         }
     }
 }

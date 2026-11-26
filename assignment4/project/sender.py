@@ -20,6 +20,8 @@ def parse_args(argv=None):
     parser.add_argument('--step-id', type=int, default=1)
     parser.add_argument('--seq-no', type=int, default=1, help='first sequence number')
     parser.add_argument('--flags', type=int, default=0)
+    # T10: put LAST (0x08) on the final packet so the switch knows the step is finished
+    parser.add_argument('--last', action='store_true')
     parser.add_argument('--payload', default='hello')
     parser.add_argument('--count', type=int, default=1)
     parser.add_argument('--rate', type=positive_rate, default=100.0)
@@ -78,7 +80,10 @@ def send_packets(sock, args, fb):
         # Absolute deadlines avoid accumulating send/loop overhead as drift.
         wait_until(start + int(index * 1_000_000_000 / args.rate))
         seq = args.seq_no + index
-        header = struct.pack('!HIBBH', args.step_id, seq, 0, args.flags,0)
+        flags = args.flags
+        if args.last and index == args.count - 1:
+            flags = flags | 0x08
+        header = struct.pack('!HIBBH', args.step_id, seq, 0, flags, 0)
         timestamp = time.monotonic_ns()
         sock.sendto(header + args.data, (args.destination, 5000))
         rows.append((args.step_id, seq, timestamp))
