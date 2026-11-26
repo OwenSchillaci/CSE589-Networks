@@ -32,6 +32,9 @@
 #define FLAG_RTT 0x20
 // T12: forget the sync state after 0.5 s with no project packets (BMv2 time is in microseconds)
 #define SYNC_IDLE_RESET 500000
+// T20: no packet of step_min for 200 ms while newer steps go through -> this switch
+// missed the LAST (flow moved spine, or LAST lost), so move step_min forward
+#define STEP_STALE 200000
 // T13: how long a path stays excluded after feedback (us), and which marks exclude it
 #define PATH_BUSY_TIME 50000
 #define EXCLUDE_ON FLAG_CONG   // default = separated mode
@@ -414,6 +417,8 @@ control MyEgress(inout headers hdr,
     register<bit<16>>(1) sync_step_min;   // slowest step still running
     register<bit<32>>(1) sync_psn_rec;    // highest seq_no seen in step_min
     register<bit<48>>(1) sync_last_seen;  // T12: time of the last data packet
+    register<bit<48>>(1) sync_min_seen;   // T20: last time step_min was set or seen
+    counter(1, CounterType.packets) stale_moves;  // T20: step_min moved by the timeout
     // T12: how many packets this switch marked SYNC (first switch to set it)
     counter(1, CounterType.packets) sync_marks;
 
@@ -455,25 +460,38 @@ control MyEgress(inout headers hdr,
                 started = 0;
             }
             sync_last_seen.write(0, now);
+            bit<48> min_seen;
+            sync_min_seen.read(min_seen, 0);
 
             // first packet ever: start from its step
             if (started == 0) {
                 started = 1;
                 step_min = step;
                 psn_rec = 0;
+                min_seen = now;
             }
             if ((hdr.project.flags & FLAG_LAST) != 0) {
                 // this step is finished, the next one becomes the slowest
                 step_min = step + 1;
                 psn_rec = 0;
+                min_seen = now;
             } else if (step < step_min) {
                 // a lagging packet, go back to its step
                 step_min = step;
                 psn_rec = seq;
+                min_seen = now;
             } else if (step == step_min) {
                 if (seq > psn_rec) {
                     psn_rec = seq;
                 }
+                min_seen = now;
+            } else if (now - min_seen > STEP_STALE) {
+                // T20: nobody on step_min passed here for a while, so this
+                // packet is not ahead of anyone here; its step is the new step_min
+                step_min = step;
+                psn_rec = seq;
+                min_seen = now;
+                stale_moves.count(0);
             }
             if (step > step_min) {
                 if ((hdr.project.flags & FLAG_SYNC) == 0) {
@@ -485,6 +503,7 @@ control MyEgress(inout headers hdr,
             sync_started.write(0, started);
             sync_step_min.write(0, step_min);
             sync_psn_rec.write(0, psn_rec);
+            sync_min_seen.write(0, min_seen);
         }
     }
 }
