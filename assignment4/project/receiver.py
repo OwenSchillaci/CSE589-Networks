@@ -64,6 +64,7 @@ def main(argv=None):
     stats = Statistics(args.count, args.seq_no)
     rows = []
     malformed = 0
+    feedback_sent = 0
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.bind(('0.0.0.0', 5000))
         # ask Linux to give us the TOS byte of each packet so we can see the ECN bits
@@ -89,6 +90,13 @@ def main(argv=None):
                 step, seq, path, flags, qdepth = struct.unpack('!HIBBH', data[:10])
                 duplicate, reordered = stats.record(seq, path)
                 rows.append((step, seq, path, flags, qdepth, timestamp, int(duplicate), int(reordered), ecn))
+                # T09: packet has a mark (SYNC 0x01 or CONG 0x02) -> send feedback back to the sender
+                # keep path_id = the forward path, copy the mark bits, add FEEDBACK 0x04
+                marks = flags & 0x03
+                if marks:
+                    feedback = struct.pack('!HIBBH', step, seq, path, marks | 0x04, qdepth)
+                    sock.sendto(feedback, (peer[0], 5000))
+                    feedback_sent += 1
                 if not args.output:
                     print('step_id=%d seq_no=%d path_id=%d flags=%d qdepth=%d payload=%r' %
                           (step, seq, path, flags, qdepth, data[10:]), flush=True)
@@ -103,12 +111,12 @@ def main(argv=None):
     duration = (rows[-1][5] - rows[0][5]) / 1_000_000_000 if len(rows) > 1 else 0.0
     rate = (len(rows) - 1) / duration if duration > 0 else 0.0
     print('received=%d unique=%d duplicates=%d missing=%d out_of_order=%d malformed=%d '
-          'paths=%s max_qdepth=%d ce_marked=%d cong_flag=%d duration=%.6fs actual_rate=%.2f packets/s' %
+          'paths=%s max_qdepth=%d ce_marked=%d cong_flag=%d feedback_sent=%d duration=%.6fs actual_rate=%.2f packets/s' %
           (stats.received, len(stats.seen), stats.duplicates, stats.missing(),
            stats.out_of_order, malformed, dict(stats.paths),
            max((row[4] for row in rows), default=0),
            sum(row[8] == 3 for row in rows),
-           sum((row[3] & 0x02) != 0 for row in rows), duration, rate))
+           sum((row[3] & 0x02) != 0 for row in rows), feedback_sent, duration, rate))
 
 
 if __name__ == '__main__':

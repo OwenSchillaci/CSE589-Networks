@@ -206,7 +206,13 @@ control MyIngress(inout headers hdr,
         if (standard_metadata.parser_error != error.NoError) {
             drop();
         } else if (hdr.project.isValid()) {
+            // T09: feedback carries the forward path_id, remember it before the table runs
+            bit<8> fwd_path = hdr.project.path_id;
             project_forward.apply();
+            // select_path on the way back would overwrite it, so put it back
+            if ((hdr.project.flags & FLAG_FEEDBACK) != 0) {
+                hdr.project.path_id = fwd_path;
+            }
             // T11: if the slow cable marked ECN CE (11) on this packet, save the
             // cause in our own CONG flag so it is not mixed up with SYNC later
             if ((hdr.ipv4.diffserv & 0x03) == 0x03) {

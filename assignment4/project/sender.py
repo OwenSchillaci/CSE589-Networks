@@ -48,7 +48,30 @@ def wait_until(deadline_ns):
         time.sleep(remaining / 1_000_000_000)
 
 
-def send_packets(sock, args):
+def read_feedback(sock, fb, wait=False):
+    # T09: read feedback packets from the receiver without blocking the sending loop
+    while True:
+        try:
+            if wait:
+                data = sock.recv(2048)
+            else:
+                data = sock.recv(2048, socket.MSG_DONTWAIT)
+        except (BlockingIOError, socket.timeout):
+            return
+        if len(data) < 10:
+            continue
+        step, seq, path, flags, qdepth = struct.unpack('!HIBBH', data[:10])
+        if not flags & 0x04:
+            continue
+        fb['total'] += 1
+        fb['path%d' % path] = fb.get('path%d' % path, 0) + 1
+        if flags & 0x02:
+            fb['cong'] += 1
+        if flags & 0x01:
+            fb['sync'] += 1
+
+
+def send_packets(sock, args, fb):
     rows = []
     start = time.monotonic_ns()
     for index in range(args.count):
@@ -59,6 +82,10 @@ def send_packets(sock, args):
         timestamp = time.monotonic_ns()
         sock.sendto(header + args.data, (args.destination, 5000))
         rows.append((args.step_id, seq, timestamp))
+        read_feedback(sock, fb)
+    # wait a bit for the last feedback packets to come back
+    sock.settimeout(1.0)
+    read_feedback(sock, fb, wait=True)
     return rows
 
 
@@ -67,7 +94,10 @@ def main(argv=None):
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         # set ECT(0) in the IP header so RED marks our packets instead of dropping them
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, 0x02)
-        rows = send_packets(sock, args)
+        # listen on 5000 too, the receiver sends feedback here
+        sock.bind(('0.0.0.0', 5000))
+        fb = {'total': 0, 'cong': 0, 'sync': 0}
+        rows = send_packets(sock, args, fb)
     if args.output:
         with open(args.output, 'w', newline='') as output:
             writer = csv.writer(output)
@@ -77,6 +107,8 @@ def main(argv=None):
     rate = (len(rows) - 1) / duration if duration > 0 else 0.0
     print('sent=%d duration=%.6fs actual_rate=%.2f packets/s' %
           (len(rows), duration, rate))
+    print('feedback=%d cong=%d sync=%d path0=%d path1=%d' %
+          (fb['total'], fb['cong'], fb['sync'], fb.get('path0', 0), fb.get('path1', 0)))
 
 
 if __name__ == '__main__':
