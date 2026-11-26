@@ -5,6 +5,7 @@
 #   sh project/ring_test.sh                  balanced, 320 packets per step at 300 pkt/s
 #   sh project/ring_test.sh 320 300 1 150    rank 1 sends at half speed
 #   sh project/ring_test.sh 320 300 -1 0 2 1 rank 2 starts 1 s late
+#   7th arg cc: 1 = ranks slow down on SYNC/CONG feedback (T19)
 
 COUNT=${1:-320}
 RATE=${2:-300}
@@ -12,6 +13,9 @@ SLOW=${3:--1}
 SLOWRATE=${4:-150}
 LATE=${5:--1}
 LATES=${6:-1.0}
+CC=${7:-0}
+OPT=
+[ $CC = 1 ] && OPT=--cc
 OUT=.project-run/ring-test
 RUN="docker exec mn-stratum python3 -B project/host_exec.py"
 HOSTS="h1 h3 h2 h4"
@@ -39,7 +43,7 @@ for R in 0 1 2 3; do
     DELAY=0
     [ $R = $LATE ] && DELAY=$LATES
     $RUN $H python3 project/ring.py --rank $R --next $NEXT --prev $PREV --count $COUNT \
-        --rate $MYRATE --start-ns $START --start-delay $DELAY --outdir /workdir/$OUT > $OUT/rank$R.log 2>&1 &
+        --rate $MYRATE --start-ns $START --start-delay $DELAY $OPT --outdir /workdir/$OUT > $OUT/rank$R.log 2>&1 &
 done
 wait
 
@@ -47,5 +51,5 @@ for R in 0 1 2 3; do
     echo "===== rank $R"
     cat $OUT/rank$R.log
 done
-echo "===== report"
+echo "===== report ($(grep -h 'Feedback mode' .project-run/p4runtime-sh-50003.log | tail -1), cc=$CC)"
 docker exec mn-stratum python3 -B project/ring_report.py /workdir/$OUT $START 4 $COUNT

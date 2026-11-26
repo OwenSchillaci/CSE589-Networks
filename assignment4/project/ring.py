@@ -33,6 +33,7 @@ def parse_args(argv=None):
     p.add_argument('--start-delay', type=float, default=0.0, help='this rank starts later (s)')
     p.add_argument('--timeout', type=float, default=60.0)
     p.add_argument('--outdir', default='.')
+    p.add_argument('--cc', action='store_true', help='T18 rule: slow down on SYNC or CONG feedback')
     p.add_argument('--bind', default='', help='local IP to bind (only for testing on one machine)')
     return p.parse_args(argv)
 
@@ -69,7 +70,22 @@ def main(argv=None):
     queue = []                             # packets to resend, before new ones
     tx_rows = []
     retransmitted = rounds = 0
-    fb = {'sync': 0, 'cong': 0, 'rtt': 0, 'path0': 0, 'path1': 0}
+    fb = {'sync': 0, 'cong': 0, 'rtt': 0, 'path0': 0, 'path1': 0, 'marks': 0}
+    # T19: same rate rule as sender.py --cc (T18), times in seconds here
+    cc = {'rate': args.rate, 'min': args.rate * 0.02, 'marks': 0, 'last_cut': -1.0,
+          'last_up': 0.0, 'cuts': 0, 'lowest': args.rate}
+
+    def adjust_rate(now):
+        if fb['marks'] > cc['marks'] and now - cc['last_cut'] >= 0.05:
+            cc['rate'] = max(cc['min'], cc['rate'] * 0.5)
+            cc['marks'] = fb['marks']
+            cc['last_cut'] = now
+            cc['last_up'] = now
+            cc['cuts'] += 1
+            cc['lowest'] = min(cc['lowest'], cc['rate'])
+        elif fb['marks'] == cc['marks'] and now - cc['last_up'] >= 0.05:
+            cc['rate'] = min(args.rate, cc['rate'] + 0.05 * args.rate)
+            cc['last_up'] = now
 
     def ready(s, q):
         if s == 1:
@@ -138,6 +154,7 @@ def main(argv=None):
                     fb['cong'] += 1
                 if flags & (SYNC | CONG):
                     fb['path%d' % (path & 1)] += 1
+                    fb['marks'] += 1
                 continue
             # data from the previous rank
             if s not in got:
@@ -166,7 +183,6 @@ def main(argv=None):
         read_all()
         time.sleep(0.001)
 
-    gap = 1.0 / args.rate
     next_time = time.monotonic()
     next_ack = next_time
     deadline = start_ns / 1e9 + args.timeout
@@ -189,6 +205,9 @@ def main(argv=None):
         if now > deadline:
             break
 
+        if args.cc:
+            adjust_rate(now)
+
         if now >= next_time:
             pkt = None
             if queue:
@@ -204,9 +223,9 @@ def main(argv=None):
             if pkt:
                 s, q, re, flags = pkt
                 sock.sendto(struct.pack(HDR, s, q, 0, flags, 0) + payload, (args.next, PORT))
-                tx_rows.append((s, q, time.monotonic_ns(), re))
+                tx_rows.append((s, q, time.monotonic_ns(), re, int(cc['rate'])))
                 retransmitted += re
-                next_time += gap
+                next_time += 1.0 / cc['rate']
                 if next_time < now - 0.05:
                     next_time = now     # no burst after waiting
             else:
@@ -218,7 +237,7 @@ def main(argv=None):
     os.makedirs(args.outdir, exist_ok=True)
     with open(os.path.join(args.outdir, 'rank%d_tx.csv' % args.rank), 'w', newline='') as f:
         w = csv.writer(f)
-        w.writerow(('step_id', 'seq_no', 'send_monotonic_ns', 'retransmit'))
+        w.writerow(('step_id', 'seq_no', 'send_monotonic_ns', 'retransmit', 'rate'))
         w.writerows(tx_rows)
     with open(os.path.join(args.outdir, 'rank%d_rx.csv' % args.rank), 'w', newline='') as f:
         w = csv.writer(f)
@@ -234,6 +253,9 @@ def main(argv=None):
           (sum(len(v) for v in got.values()), dups, done))
     print('feedback sync=%d cong=%d path0=%d path1=%d rtt_replies=%d' %
           (fb['sync'], fb['cong'], fb['path0'], fb['path1'], fb['rtt']))
+    if args.cc:
+        print('cc=on cuts=%d lowest_rate=%.1f final_rate=%.1f packets/s' %
+              (cc['cuts'], cc['lowest'], cc['rate']))
     print('complete=%s' % (all_sent_ok and all_received))
 
 

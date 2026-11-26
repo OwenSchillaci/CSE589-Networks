@@ -45,7 +45,7 @@ def main():
         group_done = {k: max(v) for k, v in group_done.items() if len(v) == gsize(k[1])}
         step_done = {s: max(v) for s, v in step_done.items() if len(v) == count}
         done_at[r] = step_done
-        for s, q, t, re in tx[r]:
+        for s, q, t, re, *_ in tx[r]:
             if re or s == 1:
                 continue
             checked += 1
@@ -57,7 +57,7 @@ def main():
 
     # skew every 10 ms
     end_ns = max(row[2] for r in tx for row in tx[r])
-    firsts = {r: sorted((t, s) for s, q, t, re in tx[r] if not re) for r in range(ranks)}
+    firsts = {r: sorted((t, s) for s, q, t, re, *_ in tx[r] if not re) for r in range(ranks)}
     idx = {r: 0 for r in range(ranks)}
     cur = {r: 0 for r in range(ranks)}
     samples = []
@@ -82,6 +82,20 @@ def main():
     for t_ns, c, a in samples[::50]:
         print('  t=%5.2fs  %s' % ((t_ns - start_ns) / 1e9,
                                   '  '.join('r%d:%s' % (r, c[r] if r in a else 'done') for r in range(ranks))))
+    # T19: what the network did to the ring traffic
+    paths, sync, cong, ooo = {}, 0, 0, 0
+    for r in range(ranks):
+        highest = {}
+        for s, q, path, flags, qd, t, dup in rx[r]:
+            paths[path] = paths.get(path, 0) + 1
+            sync += (flags & 0x01) != 0
+            cong += (flags & 0x02) != 0
+            if not dup:
+                if q < highest.get(s, 0):
+                    ooo += 1
+                highest[s] = max(highest.get(s, 0), q)
+    print('network: paths=%s sync_marked=%d cong_marked=%d out_of_order=%d' %
+          (dict(sorted(paths.items())), sync, cong, ooo))
     finish = []
     for r in range(ranks):
         if len(done_at[r]) == steps:
