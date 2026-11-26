@@ -147,7 +147,19 @@ if __name__ == '__main__':
     parser.add_argument('--topo-config', help='Topology Configuration File', required=True,
                         type=str, action="store")
     parser.add_argument('--path-id', type=int, choices=(0, 1), default=0)
+    # T15: shared = SYNC or CONG excludes a path, separated = only CONG
+    # T15: if --mode is not given, read it from feedback_mode.txt (missing file = separated)
+    parser.add_argument('--mode', choices=('separated', 'shared'), default=None)
     args = parser.parse_args()
+    if args.mode is None:
+        try:
+            with open('feedback_mode.txt') as infile:
+                args.mode = infile.read().strip()
+        except FileNotFoundError:
+            args.mode = 'separated'
+        if args.mode not in ('separated', 'shared'):
+            print('WARNING: unknown mode {0!r} in feedback_mode.txt, using separated'.format(args.mode))
+            args.mode = 'separated'
 
     # Create a bridge name postfixed with the grpc port number
     bridge_name = 'bridge-{0}'.format(args.grpc_port)
@@ -191,6 +203,15 @@ if __name__ == '__main__':
             else:
                 entry.action['port'] = str(route['port'])
             entry.insert()
+    if args.mode == 'shared':
+        try:
+            entry = p4sh.TableEntry('MyIngress.feedback_mode')(action='MyIngress.set_mode')
+            entry.action['exclude_mask'] = str(0x03)
+            entry.is_default = True
+            entry.modify()
+        except Exception as error:
+            print('WARNING: could not set shared mode: {0}'.format(error))
+    print('Feedback mode: {0}'.format(args.mode))
     print('Project path: {0}'.format(args.path_id))
 
     # Start the packet-processing loop

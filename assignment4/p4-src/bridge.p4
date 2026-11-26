@@ -32,7 +32,7 @@
 #define SYNC_IDLE_RESET 500000
 // T13: how long a path stays excluded after feedback (us), and which marks exclude it
 #define PATH_BUSY_TIME 50000
-#define EXCLUDE_ON FLAG_CONG
+#define EXCLUDE_ON FLAG_CONG   // default = separated mode
 /*
   255 is confirmed for opennetworking/p4mn　(Mininet/Stratum on docker)
   192 is confirmed for WEDGE-100BF-32X (2 pipes device)
@@ -96,6 +96,8 @@ struct metadata {
     bit<9> port0;
     bit<9> port1;
     bit<8> pref;
+    // T15: which marks exclude a path (separated = CONG, shared = SYNC | CONG)
+    bit<8> exclude_mask;
 }
 
 struct headers {
@@ -188,6 +190,16 @@ control MyIngress(inout headers hdr,
         standard_metadata.mcast_grp = MCAST_ID;
     }
 
+    // T15: the controller picks the mode by changing this table's default action
+    action set_mode(bit<8> exclude_mask) {
+        meta.exclude_mask = exclude_mask;
+    }
+
+    table feedback_mode {
+        actions = { set_mode; }
+        default_action = set_mode(EXCLUDE_ON);
+    }
+
     action forward_to_port(bit<9> port) {
         standard_metadata.egress_spec = port;
     }
@@ -233,6 +245,7 @@ control MyIngress(inout headers hdr,
             // T09: feedback carries the forward path_id, remember it before the table runs
             bit<8> fwd_path = hdr.project.path_id;
             meta.selected = 0;
+            feedback_mode.apply();
             project_forward.apply();
             bit<48> now = standard_metadata.ingress_global_timestamp;
 
@@ -269,7 +282,7 @@ control MyIngress(inout headers hdr,
                 hdr.project.path_id = fwd_path;
                 // T13: feedback reached the leaf of the original sender (not chosen
                 // by select_path here), so exclude the forward path it names
-                if (meta.selected == 0 && (hdr.project.flags & EXCLUDE_ON) != 0) {
+                if (meta.selected == 0 && (hdr.project.flags & meta.exclude_mask) != 0) {
                     bit<48> old_busy;
                     busy_until.read(old_busy, (bit<32>) fwd_path);
                     if (old_busy <= now) {
